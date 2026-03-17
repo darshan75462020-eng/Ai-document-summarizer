@@ -1,189 +1,175 @@
 import logging
 import time
+import torch
+import re
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 from keybert import KeyBERT
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
-import torch
-import re
+import os
+# Set timeout to 10 minutes (600 seconds) for slow connections
+os.environ["HF_HUB_READ_TIMEOUT"] = "600"
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+# --------------------------------------------------
+# Logging
+# --------------------------------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
 logger = logging.getLogger(__name__)
 
-model_name = "sshleifer/distilbart-cnn-12-6"
-
+# --------------------------------------------------
+# MODEL INITIALIZATION
+# --------------------------------------------------
+model_name = "google/flan-t5-base"
 device = "cuda" if torch.cuda.is_available() else "cpu"
-logger.info(f"Using compute device: {device}")
+logger.info(f"Using device: {device}")
 
-# Load models
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 model = AutoModelForSeq2SeqLM.from_pretrained(model_name).to(device)
-
-kw_model = KeyBERT()
-embed_model = SentenceTransformer("all-MiniLM-L6-v2")
-
+embed_model = SentenceTransformer("all-MiniLM-L6-v2", device=device)
+kw_model = KeyBERT(model=embed_model)
 
 # --------------------------------------------------
-# Extract Important Sentences (Speed Optimization)
+# Text Cleaning & Deduplication
 # --------------------------------------------------
-def extract_important_text(text, keep_ratio=0.35):
-
-    sentences = [
-        re.sub(r"[^a-zA-Z0-9 ,.-]", "", s).strip()
-        for s in text.split(".")
-        if len(s.strip()) > 20
-    ]
-
-    if len(sentences) == 0:
-        return text
+def clean_sentences(text):
+    sentences = re.split(r"[.!?]", text)
+    seen = set()
+    cleaned = []
+    for s in sentences:
+        s_clean = re.sub(r"\s+", " ", s).strip()
+        # Only keep unique sentences to prevent 'internship and internship' [cite: 62, 64]
+        if len(s_clean) > 20 and s_clean.lower() not in seen:
+            cleaned.append(s_clean)
+            seen.add(s_clean.lower())
+    return cleaned
+# --------------------------------------------------
+# Semantic Logic (Extractive)
+# --------------------------------------------------
+def extract_important_text(text, keep_ratio=0.6):
+    """Ranks and keeps the most relevant sentences."""
+    sentences = clean_sentences(text)
+    if not sentences: return text
 
     embeddings = embed_model.encode(sentences)
-
     doc_embedding = embeddings.mean(axis=0)
-
     scores = cosine_similarity([doc_embedding], embeddings)[0]
 
-    ranked = sorted(
-        zip(sentences, scores),
-        key=lambda x: x[1],
-        reverse=True
-    )
+    ranked = sorted(zip(sentences, scores), key=lambda x: x[1], reverse=True)
+    top_n = max(3, int(len(sentences) * keep_ratio))
+    
+    return ". ".join([s for s, _ in ranked[:top_n]])
 
-    top_n = int(len(sentences) * keep_ratio)
-
-    important_sentences = [s for s, _ in ranked[:top_n]]
-
-    logger.info(f"Reduced text from {len(sentences)} to {top_n} important sentences.")
-
-    return ". ".join(important_sentences)
-
-
-# --------------------------------------------------
-# Key Bullet Points
-# --------------------------------------------------
 def extract_key_points(text, top_n=5):
-
-    sentences = [
-        re.sub(r"[^a-zA-Z0-9 ,.-]", "", s).strip()
-        for s in text.split(".")
-        if len(s.strip()) > 20
-    ]
-
-    if len(sentences) == 0:
-        return ""
+    """
+    Generates unique bullet points and prevents repeating the same 
+    project multiple times.
+    """
+    sentences = clean_sentences(text)
+    if not sentences: return ""
 
     embeddings = embed_model.encode(sentences)
-
     doc_embedding = embeddings.mean(axis=0)
-
     scores = cosine_similarity([doc_embedding], embeddings)[0]
 
-    ranked = sorted(
-        zip(sentences, scores),
-        key=lambda x: x[1],
-        reverse=True
-    )
+    ranked = sorted(zip(sentences, scores), key=lambda x: x[1], reverse=True)
+    
+    unique_bullets = []
+    seen_content = set()
 
-    bullets = "\n".join([f"- {s}" for s, _ in ranked[:top_n]])
+    for s, score in ranked:
+        # Check first 25 chars to ensure bullets cover different topics
+        prefix = s[:25].lower()
+        if prefix not in seen_content:
+            unique_bullets.append(f"- {s}")
+            seen_content.add(prefix)
+        
+        if len(unique_bullets) >= top_n:
+            break
 
-    return bullets
-
-
-# --------------------------------------------------
-# Text Chunking
-# --------------------------------------------------
-def split_text(text, chunk_size=600):
-
-    words = text.split()
-    chunks = []
-
-    for i in range(0, len(words), chunk_size):
-        chunk = " ".join(words[i:i + chunk_size])
-        chunks.append(chunk)
-
-    return chunks
-
+    return "\n".join(unique_bullets)
 
 # --------------------------------------------------
-# Main AI Pipeline
+# Chunking Logic
+# --------------------------------------------------
+def split_into_semantic_chunks(text, max_words=350):
+    """Groups sentences to avoid context loss during processing."""
+    sentences = clean_sentences(text)
+    chunks, current_chunk, current_count = [], [], 0
+
+    for sentence in sentences:
+        word_count = len(sentence.split())
+        if current_count + word_count <= max_words:
+            current_chunk.append(sentence)
+            current_count += word_count
+        else:
+            chunks.append(". ".join(current_chunk))
+            current_chunk, current_count = [sentence], word_count
+    
+    if current_chunk: 
+        chunks.append(". ".join(current_chunk))
+    return chunks[:8]
+
+# --------------------------------------------------
+# AI Generation (Abstractive)
+# --------------------------------------------------
+def generate(prompt, is_final=False):
+    """Generates text with low temperature to stop hallucinations."""
+    inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=512).to(device)
+
+    with torch.no_grad():
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=150 if is_final else 100,
+            min_length=40,
+            do_sample=True,
+            top_p=0.92,
+            temperature=0.5, # Low temp for factual grounding
+            repetition_penalty=2.5,
+            no_repeat_ngram_size=3,
+            early_stopping=True
+        )
+    return tokenizer.decode(outputs[0], skip_special_tokens=True)
+
+# --------------------------------------------------
+# MAIN PIPELINE
 # --------------------------------------------------
 def generate_ai_insights(text):
-
-    start_time = time.time()
-
-    # -------- STEP 1: Reduce Text (10x speed trick) --------
-    logger.info("Extracting important sentences before summarization...")
-    text = extract_important_text(text)
-
-    # -------- Generator Function --------
-    def generate(prompt, max_len=150, min_len=40):
-
-        inputs = tokenizer(
-            prompt,
-            return_tensors="pt",
-            truncation=True,
-            max_length=1024
-        ).to(device)
-
-        with torch.no_grad():
-            outputs = model.generate(
-                **inputs,
-                max_length=max_len,
-                min_length=min_len,
-                num_beams=4,
-                repetition_penalty=2.0,
-                length_penalty=2.0,
-                no_repeat_ngram_size=3,
-                early_stopping=True
-            )
-
-        return tokenizer.decode(outputs[0], skip_special_tokens=True)
-
-    # -------- STEP 2: Chunking --------
-    chunks = split_text(text, chunk_size=600)
-    logger.info(f"Created {len(chunks)} text chunks for summarization.")
-
+    """Coordinates extraction with strict grounding constraints."""
+    start = time.time()
+    
+    important_text = extract_important_text(text)
+    chunks = split_into_semantic_chunks(important_text)
+    
     chunk_summaries = []
+    for chunk in chunks:
+        # Prefix forcing for objective tone
+        prompt = f"Facts: {chunk}\n\nObjective Summary: This document details"
+        chunk_summaries.append("This document details " + generate(prompt))
 
-    for i, chunk in enumerate(chunks, 1):
+    combined_text = " ".join(chunk_summaries)
+    
+    # Final Synthesis
+    final_prompt = f"""
+    Context: {combined_text}
+    
+    Task: Write a factual 3-sentence summary of this person's professional background.
+    Rule: Start with "This document outlines". Do not use fragments like "JS, MDX".
+    
+    Summary:
+    This document outlines"""
 
-        logger.info(f"Summarizing chunk {i}/{len(chunks)}...")
+    final_summary = "This document outlines " + generate(final_prompt, is_final=True)
+    # Final forced prefix
+    final_summary = "The provided document confirms that " + generate(final_prompt, is_final=True)
 
-        try:
-            summary_text = generate(chunk)
-            chunk_summaries.append(summary_text)
+    bullets = extract_key_points(important_text)
+    keywords_raw = kw_model.extract_keywords(important_text, top_n=6)
+    keywords = ", ".join([k[0] for k in keywords_raw])
 
-        except Exception as e:
-            logger.error(f"Error summarizing chunk {i}: {str(e)}")
-
-    combined_summary = " ".join(chunk_summaries)
-
-    # -------- STEP 3: Hierarchical Summarization --------
-    logger.info("Running hierarchical summarization...")
-
-    try:
-        final_summary = generate(combined_summary, max_len=200, min_len=50)
-
-    except Exception as e:
-        logger.error(f"Error in hierarchical summarization: {str(e)}")
-        final_summary = combined_summary
-
-    # -------- STEP 4: Bullet Points --------
-    bullets = extract_key_points(text)
-
-    # -------- STEP 5: Keywords --------
-    keywords = kw_model.extract_keywords(
-        text,
-        keyphrase_ngram_range=(1, 2),
-        stop_words="english",
-        top_n=5
-    )
-
-    keywords = ", ".join([kw[0] for kw in keywords])
-
-    end_time = time.time()
-    logger.info(f"Total summarization time: {end_time - start_time:.2f} seconds.")
+    logger.info(f"Analysis complete in {time.time()-start:.2f}s")
 
     return {
         "summary": final_summary,
