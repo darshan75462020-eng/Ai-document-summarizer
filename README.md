@@ -3,7 +3,7 @@
 An intelligent web application that allows users to upload PDF documents and get concise, AI-generated summaries instantly. This project leverages modern AI techniques to simplify reading long documents and improve productivity.
 
 🚀 Features
-📤 Upload PDF documents بسهولة
+📤 Upload PDF documents 
 🤖 AI-powered text summarization
 ⚡ Fast and efficient processing
 🧠 Extracts key insights from long content
@@ -18,14 +18,13 @@ HTTP Requests: Requests library
 📂 Project Structure
 AI-Document-Summarizer/
 │
-├── app.py                # Main Streamlit application
+├── frontend.py                # Main Streamlit application
 ├── requirements.txt     # Dependencies
-├── utils.py             # Helper functions (PDF extraction, cleaning)
-├── summarizer.py        # AI summarization logic
+├── app.py        # AI summarization logic
 └── README.md            # Project documentation
 ⚙️ Installation
 1. Clone the repository
-git clone https://github.com/your-username/ai-document-summarizer.git
+git clone https://github.com/darshan75462020-eng/Ai-document-summarizer.git
 cd ai-document-summarizer
 2. Create virtual environment (recommended)
 python -m venv venv
@@ -53,6 +52,7 @@ Summary is displayed instantly
 🧑‍💼 Professionals reviewing reports
 🧪 Researchers analyzing papers
 📰 Quick news/document digestion
+
 ⚡ Future Improvements
 🔍 Keyword extraction
 🌐 Multi-language support
@@ -61,9 +61,6 @@ Summary is displayed instantly
 📁 Support for DOCX, TXT files
 
 
-📜 License
-
-This project is licensed under the MIT License.
 
 🙌 Acknowledgements
 OpenAI for AI capabilities
