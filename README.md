@@ -31,13 +31,11 @@ python -m venv venv
 venv\Scripts\activate   # Windows
 3. Install dependencies
 pip install -r requirements.txt
-🔑 Setup API Key
 
-Create a .env file and add your API key:
 
-OPENAI_API_KEY=your_api_key_here
+
 ▶️ Run the Application
-streamlit run app.py
+streamlit run frontend.py
 
 Then open your browser at:
 
